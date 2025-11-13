@@ -1,1 +1,135 @@
+import numpy as np
+from noise import pnoise2
+import math
 
+# --- KORRIGIERTER IMPORT DER BLOCK-IDs ---
+from .block_definitions import (
+    ID_AIR, ID_GRASS, ID_DIRT, ID_STONE,
+    ID_OAK_LOG, ID_LEAVES
+)
+
+# --- Globale Config (Konstanten) ---
+CHUNK_SIZE = 16
+MAX_HEIGHT = 64
+RENDER_DISTANCE_CHUNKS = 8
+
+BLOCK_DATA_SHAPE = (CHUNK_SIZE + 2, MAX_HEIGHT, CHUNK_SIZE + 2)
+
+# HINWEIS: CUBE_VERTICES, CUBE_UVS, CUBE_NORMALS WURDEN NACH geometry_constants.py VERSCHOBEN
+
+# --- NOISE-DEFINITIONEN FÜR MINECRAFT-STIL ---
+BASE_SCALE = 0.005
+DETAIL_SCALE = 0.040
+MAIN_OCTAVES = 5
+MAIN_AMPLITUDE = MAX_HEIGHT * 0.6
+FLAT_BASE_HEIGHT = 20
+EXPONENT = 2.5
+
+
+# --- HILFSFUNKTION ZUR PLATZIERUNG EINES BAUMES ---
+def place_tree(block_data, x, z, y_surface, base_x, base_z):
+    LOG_HEIGHT = 4
+    CROWN_RADIUS = 2
+
+    y_start = y_surface + 1
+    top_log_y = y_start + LOG_HEIGHT
+
+    # 1. Stamm platzieren
+    for y in range(y_start, top_log_y):
+        if y < MAX_HEIGHT:
+            block_data[x, y, z] = ID_OAK_LOG
+
+    # 2. Krone platzieren (Beginnt hier wahrscheinlich zu tief, auf top_log_y - 1)
+    crown_center_y = top_log_y
+
+    for cy in range(crown_center_y - 1, crown_center_y + 2):
+        if cy >= MAX_HEIGHT:
+            continue
+
+        current_radius = CROWN_RADIUS
+        if cy == crown_center_y + 1:
+            current_radius = 1
+
+        for cx in range(x - current_radius, x + current_radius + 1):
+            for cz in range(z - current_radius, z + current_radius + 1):
+
+                if 0 < cx < CHUNK_SIZE + 1 and 0 < cz < CHUNK_SIZE + 1:
+                    is_log_col = (cx == x and cz == z)
+                    if is_log_col:
+                        continue # Stamm-Spalte ignorieren
+
+                    if block_data[cx, cy, cz] == ID_AIR:
+                        block_data[cx, cy, cz] = ID_LEAVES
+    return
+
+def generate_chunk_block_data(cx, cz):
+    """Generiert die vollständigen 3D-Blockdaten für einen Chunk."""
+    block_data = np.full(BLOCK_DATA_SHAPE, ID_AIR, dtype=np.float32)
+
+    base_x = cx * CHUNK_SIZE - 1
+    base_z = cz * CHUNK_SIZE - 1
+    heightmap = {}
+
+    for x in range(CHUNK_SIZE + 2):
+        for z in range(CHUNK_SIZE + 2):
+            wx = base_x + x
+            wz = base_z + z
+
+            # --- TERRAIN-GENERIERUNG (Minecraft-Stil) ---
+
+            base_noise_raw = pnoise2(wx * BASE_SCALE, wz * BASE_SCALE,
+                                    octaves=MAIN_OCTAVES,
+                                    repeatx=1024, repeaty=1024, base=111)
+
+            detail_noise_raw = pnoise2(wx * DETAIL_SCALE, wz * DETAIL_SCALE,
+                                    octaves=1,
+                                    repeatx=1024, repeaty=1024, base=222)
+
+            combined_noise = base_noise_raw * 0.7 + detail_noise_raw * 0.3
+
+            normalized_noise = (combined_noise + 1.0) * 0.5
+            exp_noise = normalized_noise ** EXPONENT
+
+            final_height = exp_noise * MAIN_AMPLITUDE + FLAT_BASE_HEIGHT
+
+            height = int(max(1.0, min(final_height, MAX_HEIGHT - 3))) + 3
+            heightmap[(x, z)] = height
+
+            # Füllen des Chunks mit Blöcken
+            for y in range(MAX_HEIGHT):
+                if y < height:
+                    if y == height - 1:
+                        block_data[x, y, z] = ID_GRASS
+                    elif y >= height - 4:
+                        block_data[x, y, z] = ID_DIRT
+                    else:
+                        block_data[x, y, z] = ID_STONE
+
+    # --- BAUMPLATZIERUNGS-LOOP (Randprüfung inklusive) ---
+    TREE_PROBABILITY = 0.21
+    CROWN_SAFETY_MARGIN = 3
+
+    for x in range(1, CHUNK_SIZE + 1):
+        for z in range(1, CHUNK_SIZE + 1):
+
+            # Randprüfung (keine Bäume zu nah am Rand)
+            if (x < CROWN_SAFETY_MARGIN or
+                x > CHUNK_SIZE + 1 - CROWN_SAFETY_MARGIN or
+                z < CROWN_SAFETY_MARGIN or
+                z > CHUNK_SIZE + 1 - CROWN_SAFETY_MARGIN):
+                continue
+
+            wx = base_x + x
+            wz = base_z + z
+
+            y_surface = heightmap[(x, z)] - 1
+
+            if block_data[x, y_surface, z] == ID_GRASS:
+
+                tree_chance_raw = pnoise2(wx * 0.2, wz * 0.2, octaves=1, base=999)
+                tree_chance = (tree_chance_raw + 1.0) * 0.5
+
+                if tree_chance < TREE_PROBABILITY:
+                    place_tree(block_data, x, z, y_surface, base_x, base_z)
+
+    return block_data
