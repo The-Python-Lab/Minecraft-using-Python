@@ -13,6 +13,7 @@ from src.opengl_core import (
 )
 from src.chunk_mesh import block_data_worker_wrapper, mesh_worker_wrapper
 from src.player import Player
+from src.lighting_system import LightingSystem  # NEU!
 
 # Globale Thread-Konstante
 THREAD_POOL_SIZE = 4
@@ -30,6 +31,9 @@ class GameWorld:
         # World-State
         self.chunk_data = {}  # {coord: (vao, count, vbo, ebo)}
         self.world_data = {}  # Blockdaten {coord: np.array}
+
+        # NEU: Beleuchtungssystem
+        self.lighting = LightingSystem(CHUNK_SIZE, MAX_HEIGHT)
 
         # Asynchrone Job-Verwaltung
         self.data_futures = {}
@@ -52,6 +56,9 @@ class GameWorld:
         self.proj_loc = glGetUniformLocation(shader, "projection")
         self.model_loc = glGetUniformLocation(shader, "model")
 
+        # NEU: Ambient Light Uniform
+        self.ambient_loc = glGetUniformLocation(shader, "ambientLight")
+
         # Statische Projektionsmatrix setzen
         self.projection = Matrix44.perspective_projection(self.player.fovy, width / height, self.player.near,
                                                           self.player.far)
@@ -71,12 +78,9 @@ class GameWorld:
         """Setzt die GLFW-Callbacks mit Zugriff auf die Instanzmethoden."""
 
         # Setze einen User-Pointer, um die GameWorld-Instanz in den globalen Callbacks zu finden
-        # (Dies ist ein gängiger Trick, um Instanzmethoden als globale Callbacks zu nutzen)
         glfw.set_window_user_pointer(self.window, self)
 
-        # Wir müssen die Callback-Funktionen außerhalb definieren oder sie als statische/globale Wrapper nutzen,
-        # da GLFW sie so erwartet. Hier nutzen wir Wrapper-Funktionen.
-
+        # Wrapper-Funktionen für Callbacks
         def mouse_callback_wrapper(window, xpos, ypos):
             world = glfw.get_window_user_pointer(window)
             if world: world._handle_mouse_movement(xpos, ypos)
@@ -159,7 +163,7 @@ class GameWorld:
         if focused:
             self.mouse_first_input = True
 
-            # ---------------- Chunk/World-Management-Logik ----------------
+    # ---------------- Chunk/World-Management-Logik ----------------
 
     def _update_world_block(self, coord, block_x, block_y, block_z, new_id):
         """Aktualisiert Blockdaten und markiert umliegende Chunks zum Re-Meshing."""
@@ -171,10 +175,20 @@ class GameWorld:
 
         if not (0 < local_x < CHUNK_SIZE + 1 and 0 <= block_y < MAX_HEIGHT and 0 < local_z < CHUNK_SIZE + 1): return
 
+        # NEU: Speichere alte Block-ID für Lighting-Update
+        old_id = self.world_data[coord][local_x, block_y, local_z]
+
+        # Update Block-Daten
         self.world_data[coord][local_x, block_y, local_z] = new_id
+
+        # NEU: Update Beleuchtung
+        self.lighting.update_light_at_position(coord, self.world_data[coord],
+                                               block_x, block_y, block_z,
+                                               old_id, new_id)
+
         chunks_to_remesh = {coord}
 
-        # Aktualisiere PADDING des Nachbarn (Kopiert aus main.py)
+        # Aktualisiere PADDING des Nachbarn
         if block_x == 0:
             n_coord = (cx - 1, cz)
             if n_coord in self.world_data:
@@ -207,8 +221,12 @@ class GameWorld:
                     delete_chunk_buffers(vao, vbo, ebo)
                     del self.chunk_data[r_coord]
 
-                future = EXECUTOR.submit(mesh_worker_wrapper, r_cx, r_cz, self.world_data[r_coord])
-                self.mesh_futures[r_coord] = future
+                # NEU: Hole Light-Map für Re-Meshing
+                light_map = self.lighting.light_data.get(r_coord, None)
+                if light_map is not None:
+                    future = EXECUTOR.submit(mesh_worker_wrapper, r_cx, r_cz,
+                                             self.world_data[r_coord], light_map)
+                    self.mesh_futures[r_coord] = future
 
     def _manage_chunks(self):
         """Lädt, generiert und entlädt Chunks basierend auf der Spielerposition."""
@@ -231,8 +249,22 @@ class GameWorld:
 
                 # 2. Mesh-Job starten, wenn Blockdaten vorhanden sind
                 elif coord in self.world_data and coord not in self.chunk_data and coord not in self.mesh_futures:
-                    future = EXECUTOR.submit(mesh_worker_wrapper, cx, cz, self.world_data[coord])
-                    self.mesh_futures[coord] = future
+                    # NEU: Prüfe ob Light-Map existiert, sonst erstelle sie
+                    if coord not in self.lighting.light_data:
+                        try:
+                            self.lighting.init_chunk_lighting(coord, self.world_data[coord])
+                        except Exception as e:
+                            print(f"Lighting-Init Fehler für {coord}: {e}")
+                            continue
+
+                    light_map = self.lighting.light_data.get(coord, None)
+                    if light_map is not None:
+                        try:
+                            future = EXECUTOR.submit(mesh_worker_wrapper, cx, cz,
+                                                     self.world_data[coord], light_map)
+                            self.mesh_futures[coord] = future
+                        except Exception as e:
+                            print(f"Mesh-Future Fehler für {coord}: {e}")
 
         # 3. Sammeln fertiger Futures und speichern der Ergebnisse
         finished_data_futures = []
@@ -243,6 +275,10 @@ class GameWorld:
                     result = future.result()
                     if isinstance(result, Exception): raise result
                     self.world_data[coord] = result
+
+                    # NEU: Initialisiere Beleuchtung für neuen Chunk
+                    self.lighting.init_chunk_lighting(coord, result)
+
                 except Exception as e:
                     print(f"BlockData-Fehler für {coord}: {e}")
         for coord in finished_data_futures: del self.data_futures[coord]
@@ -266,7 +302,11 @@ class GameWorld:
         # 4. Veraltete Chunks entladen/löschen
         chunks_to_delete_data = [coord for coord in self.world_data if
                                  coord not in needed_coords and coord not in self.data_futures]
-        for coord in chunks_to_delete_data: del self.world_data[coord]
+        for coord in chunks_to_delete_data:
+            del self.world_data[coord]
+            # NEU: Lösche auch Light-Daten
+            if coord in self.lighting.light_data:
+                del self.lighting.light_data[coord]
 
         chunks_to_delete_mesh = [coord for coord in self.chunk_data if
                                  coord not in needed_coords and coord not in self.mesh_futures]
@@ -335,6 +375,21 @@ class GameWorld:
             self.player.target_velocity[:] = 0.0
 
         self.player.apply_physics(dt, self.world_data, CHUNK_SIZE)
+
+        # NEU: Optional - Tag/Nacht-Zyklus (auskommentiert)
+        # self._update_day_night_cycle()
+
+    def _update_day_night_cycle(self):
+        """Optional: Implementiert einen Tag/Nacht-Zyklus."""
+        # 2 Minuten für einen kompletten Zyklus
+        time_of_day = (glfw.get_time() % 120.0) / 120.0
+
+        # Berechne Ambient Light (0.05 bis 0.5)
+        ambient = 0.05 + 0.45 * abs(math.sin(time_of_day * math.pi))
+
+        # Update Shader Uniform
+        if self.ambient_loc != -1:
+            glUniform1f(self.ambient_loc, ambient)
 
     def render(self):
         """Rendert die Szene."""
