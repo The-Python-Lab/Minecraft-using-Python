@@ -1,4 +1,4 @@
-# --- src/lighting_system.py ---
+# --- src/lighting_system.py (KORRIGIERT FÜR CHUNK-GRENZEN) ---
 import numpy as np
 from collections import deque
 from numba import jit
@@ -11,7 +11,7 @@ MIN_LIGHT_LEVEL = 0
 SUNLIGHT_CHANNEL = 0
 BLOCKLIGHT_CHANNEL = 1
 
-# Richtungen für Licht-Propagierung (6 Nachbarn: +X, -X, +Y, -Y, +Z, -Z)
+# Richtungen für Licht-Propagierung (6 Nachbarn)
 LIGHT_DIRECTIONS = np.array([
     [1, 0, 0], [-1, 0, 0],
     [0, 1, 0], [0, -1, 0],
@@ -20,14 +20,11 @@ LIGHT_DIRECTIONS = np.array([
 
 
 class LightingSystem:
-    """Verwaltet Sonnen- und Blocklicht für einen Chunk."""
+    """Verwaltet Sonnen- und Blocklicht für Chunks mit Nachbar-Synchronisation."""
 
     def __init__(self, chunk_size, max_height):
         self.chunk_size = chunk_size
         self.max_height = max_height
-
-        # Light-Maps: Shape (CHUNK_SIZE+2, MAX_HEIGHT, CHUNK_SIZE+2, 2)
-        # Letzte Dimension: [0] = Sunlight, [1] = Blocklight
         self.light_data = {}  # {(cx, cz): np.array}
 
     def init_chunk_lighting(self, coord, block_data):
@@ -48,34 +45,26 @@ class LightingSystem:
         """Propagiert Sonnenlicht von oben nach unten."""
         for x in range(1, self.chunk_size + 1):
             for z in range(1, self.chunk_size + 1):
-                # Starte mit maximalem Licht an der Oberfläche
                 current_light = MAX_LIGHT_LEVEL
 
                 for y in range(self.max_height - 1, -1, -1):
                     block_id = block_data[x, y, z]
 
-                    # Luft lässt Licht durch
                     if block_id == -1.0:  # ID_AIR
                         light_map[x, y, z, SUNLIGHT_CHANNEL] = current_light
                     else:
-                        # Blätter reduzieren Licht um 1
                         if block_id == 4.0:  # ID_LEAVES
                             current_light = max(0, current_light - 1)
                             light_map[x, y, z, SUNLIGHT_CHANNEL] = current_light
                         else:
-                            # Solide Blöcke stoppen Sonnenlicht komplett
                             current_light = 0
                             light_map[x, y, z, SUNLIGHT_CHANNEL] = 0
 
     def _propagate_blocklight_initial(self, block_data, light_map):
         """Propagiert Blocklicht von Lichtquellen mit Flood-Fill."""
-        # Sammle alle Lichtquellen (hier als Platzhalter - später Fackeln etc.)
         light_sources = []
+        # TODO: Hier Lichtquellen-Blöcke finden (z.B. Fackeln)
 
-        # TODO: Hier Lichtquellen-Blöcke finden
-        # Beispiel: Fackeln würden hier erkannt werden
-
-        # Für jede Lichtquelle: Flood-Fill
         for lx, ly, lz, light_level in light_sources:
             self._flood_fill_light(light_map, block_data, lx, ly, lz,
                                    light_level, BLOCKLIGHT_CHANNEL)
@@ -85,47 +74,38 @@ class LightingSystem:
         """Flood-Fill-Algorithmus für Licht-Propagierung."""
         queue = deque()
         queue.append((start_x, start_y, start_z, light_level))
-
         visited = set()
 
         while queue:
             x, y, z, current_light = queue.popleft()
 
-            # Bounds-Check
             if (x < 0 or x >= self.chunk_size + 2 or
                     y < 0 or y >= self.max_height or
                     z < 0 or z >= self.chunk_size + 2):
                 continue
 
-            # Bereits besucht?
             if (x, y, z) in visited:
                 continue
             visited.add((x, y, z))
 
-            # Aktuelles Licht setzen
             if light_map[x, y, z, channel] < current_light:
                 light_map[x, y, z, channel] = current_light
 
-            # Licht auf 0 gefallen?
             if current_light <= 0:
                 continue
 
-            # Propagiere zu Nachbarn
             next_light = current_light - 1
 
             for dx, dy, dz in LIGHT_DIRECTIONS:
                 nx, ny, nz = x + dx, y + dy, z + dz
 
-                # Bounds-Check für Nachbar
                 if (nx < 0 or nx >= self.chunk_size + 2 or
                         ny < 0 or ny >= self.max_height or
                         nz < 0 or nz >= self.chunk_size + 2):
                     continue
 
-                # Ist der Nachbar transparent?
                 neighbor_block = block_data[nx, ny, nz]
-                if neighbor_block == -1.0 or neighbor_block == 4.0:  # Luft oder Blätter
-                    # Würde das Licht heller machen?
+                if neighbor_block == -1.0 or neighbor_block == 4.0:
                     if light_map[nx, ny, nz, channel] < next_light:
                         queue.append((nx, ny, nz, next_light))
 
@@ -138,17 +118,13 @@ class LightingSystem:
         local_x = x + 1
         local_z = z + 1
 
-        # Block entfernt (wurde zu Luft)?
         if new_block_id == -1.0 and old_block_id != -1.0:
             self._handle_light_increase(light_map, block_data, local_x, y, local_z)
-
-        # Block platziert (war Luft)?
         elif old_block_id == -1.0 and new_block_id != -1.0:
             self._handle_light_decrease(light_map, block_data, local_x, y, local_z)
 
     def _handle_light_increase(self, light_map, block_data, x, y, z):
         """Wenn ein Block entfernt wird, propagiere Licht hinein."""
-        # Finde das höchste Licht der Nachbarn
         max_neighbor_sunlight = 0
         max_neighbor_blocklight = 0
 
@@ -163,7 +139,6 @@ class LightingSystem:
                 max_neighbor_blocklight = max(max_neighbor_blocklight,
                                               light_map[nx, ny, nz, BLOCKLIGHT_CHANNEL])
 
-        # Propagiere Licht mit Flood-Fill
         if max_neighbor_sunlight > 1:
             self._flood_fill_light(light_map, block_data, x, y, z,
                                    max_neighbor_sunlight - 1, SUNLIGHT_CHANNEL)
@@ -174,21 +149,57 @@ class LightingSystem:
 
     def _handle_light_decrease(self, light_map, block_data, x, y, z):
         """Wenn ein Block platziert wird, entferne Licht."""
-        # Setze Licht auf 0
-        old_sunlight = light_map[x, y, z, SUNLIGHT_CHANNEL]
-        old_blocklight = light_map[x, y, z, BLOCKLIGHT_CHANNEL]
-
         light_map[x, y, z, SUNLIGHT_CHANNEL] = 0
         light_map[x, y, z, BLOCKLIGHT_CHANNEL] = 0
 
-        # Entferne Licht mit BFS (komplexer Algorithmus)
-        # TODO: Implementiere Light-Removal-BFS
-        # Für jetzt: Re-calculate in einem größeren Bereich
+    # ========== NEUE FUNKTIONEN FÜR CHUNK-GRENZEN ==========
+
+    def sync_light_padding(self, coord, world_data):
+        """
+        Synchronisiert das Licht-Padding mit Nachbar-Chunks.
+        Muss aufgerufen werden, nachdem alle Nachbarn geladen sind!
+        """
+        if coord not in self.light_data:
+            return
+
+        cx, cz = coord
+        light_map = self.light_data[coord]
+
+        # Synchronisiere mit allen 4 Nachbarn
+        neighbors = [
+            ((cx - 1, cz), 'left'),  # Linker Nachbar
+            ((cx + 1, cz), 'right'),  # Rechter Nachbar
+            ((cx, cz - 1), 'back'),  # Hinterer Nachbar
+            ((cx, cz + 1), 'front')  # Vorderer Nachbar
+        ]
+
+        for neighbor_coord, direction in neighbors:
+            if neighbor_coord not in self.light_data:
+                continue
+
+            neighbor_light = self.light_data[neighbor_coord]
+
+            # Kopiere Lichtdaten vom Nachbarn in unser Padding
+            if direction == 'left':  # Nachbar links (-X)
+                # Kopiere rechte Kante des Nachbarn in unsere linke Padding-Spalte
+                light_map[0, :, 1:-1, :] = neighbor_light[self.chunk_size, :, 1:-1, :]
+
+            elif direction == 'right':  # Nachbar rechts (+X)
+                # Kopiere linke Kante des Nachbarn in unsere rechte Padding-Spalte
+                light_map[self.chunk_size + 1, :, 1:-1, :] = neighbor_light[1, :, 1:-1, :]
+
+            elif direction == 'back':  # Nachbar hinten (-Z)
+                # Kopiere vordere Kante des Nachbarn in unser hinteres Padding
+                light_map[1:-1, :, 0, :] = neighbor_light[1:-1, :, self.chunk_size, :]
+
+            elif direction == 'front':  # Nachbar vorne (+Z)
+                # Kopiere hintere Kante des Nachbarn in unser vorderes Padding
+                light_map[1:-1, :, self.chunk_size + 1, :] = neighbor_light[1:-1, :, 1, :]
 
     def get_light_at_position(self, coord, x, y, z):
         """Gibt das Lichtlevel an einer Position zurück."""
         if coord not in self.light_data:
-            return MAX_LIGHT_LEVEL, 0  # Standard: volles Sonnenlicht
+            return MAX_LIGHT_LEVEL, 0
 
         light_map = self.light_data[coord]
         local_x = x + 1
@@ -206,21 +217,16 @@ class LightingSystem:
 
 @jit(nopython=True, cache=True)
 def calculate_smooth_lighting(light_map, x, y, z, face_index, channel):
-    """
-    Berechnet Smooth Lighting für die 4 Vertices einer Face.
-
-    Returns: Array mit 4 Lichtleveln (eins pro Vertex)
-    """
+    """Berechnet Smooth Lighting für die 4 Vertices einer Face."""
     vertex_lights = np.zeros(4, dtype=np.float32)
 
     # Face-Normale bestimmen
     if face_index == 0:  # Top (+Y)
-        # Vertex-Offsets relativ zum Block
         offsets = [
-            [(0, 1, 0), (-1, 1, 0), (-1, 1, -1), (0, 1, -1)],  # V0
-            [(0, 1, 0), (-1, 1, 0), (-1, 1, 1), (0, 1, 1)],  # V1
-            [(0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)],  # V2
-            [(0, 1, 0), (1, 1, 0), (1, 1, -1), (0, 1, -1)]  # V3
+            [(0, 1, 0), (-1, 1, 0), (-1, 1, -1), (0, 1, -1)],
+            [(0, 1, 0), (-1, 1, 0), (-1, 1, 1), (0, 1, 1)],
+            [(0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)],
+            [(0, 1, 0), (1, 1, 0), (1, 1, -1), (0, 1, -1)]
         ]
     elif face_index == 1:  # Bottom (-Y)
         offsets = [
@@ -258,7 +264,6 @@ def calculate_smooth_lighting(light_map, x, y, z, face_index, channel):
             [(0, 0, -1), (1, 0, -1), (1, -1, -1), (0, -1, -1)]
         ]
 
-    # Für jeden Vertex: Durchschnitt der umliegenden Blöcke
     max_height = light_map.shape[1]
     size_x = light_map.shape[0]
     size_z = light_map.shape[2]
