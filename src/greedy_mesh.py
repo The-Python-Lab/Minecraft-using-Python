@@ -1,4 +1,4 @@
-# --- src/greedy_mesh.py (MIT BELEUCHTUNG V6) ---
+# --- src/greedy_mesh.py (MIT MINECRAFT-GENAUEM LIGHTING) ---
 import numpy as np
 from numba import jit
 
@@ -9,6 +9,7 @@ from .block_definitions import (
     NON_SOLID_BLOCKS_NUMBA, OAK_LOG_TEXTURES, GRASS_TEXTURES,
     TEX_INDEX_LEAVES, TEX_INDEX_DIRT, TEX_INDEX_STONE,
 )
+from .lighting_system import calculate_minecraft_vertex_light
 
 
 @jit(nopython=True, cache=True)
@@ -21,62 +22,13 @@ def is_nonsolid(block_id, nonsolid_array):
 
 
 @jit(nopython=True, cache=True)
-def get_vertex_light(light_map, x, y, z, face_index, vertex_index, channel):
-    """
-    Berechnet Smooth Lighting für einen Vertex.
-    Mittelt das Licht der 4 umliegenden Blöcke (Ambient Occlusion Style).
-    """
-    max_height = light_map.shape[1]
-    size_x = light_map.shape[0]
-    size_z = light_map.shape[2]
-
-    # Bestimme die Offsets basierend auf Face und Vertex
-    # Vereinfachte Version: Nimm den Block selbst + 3 Nachbarn
-
-    light_sum = 0.0
-    count = 0
-
-    # Sample vom aktuellen Block
-    if 0 <= x < size_x and 0 <= y < max_height and 0 <= z < size_z:
-        light_sum += light_map[x, y, z, channel]
-        count += 1
-
-    # Sample von Nachbarn basierend auf Face-Normale
-    if face_index == 0:  # Top (+Y)
-        sample_offsets = [(0, 1, 0), (-1, 1, 0), (0, 1, -1), (-1, 1, -1)]
-    elif face_index == 1:  # Bottom (-Y)
-        sample_offsets = [(0, -1, 0), (1, -1, 0), (0, -1, 1), (1, -1, 1)]
-    elif face_index == 2:  # Left (-X)
-        sample_offsets = [(-1, 0, 0), (-1, 1, 0), (-1, 0, 1), (-1, 1, 1)]
-    elif face_index == 3:  # Right (+X)
-        sample_offsets = [(1, 0, 0), (1, 1, 0), (1, 0, 1), (1, 1, 1)]
-    elif face_index == 4:  # Front (+Z)
-        sample_offsets = [(0, 0, 1), (-1, 0, 1), (0, 1, 1), (-1, 1, 1)]
-    else:  # Back (-Z)
-        sample_offsets = [(0, 0, -1), (1, 0, -1), (0, 1, -1), (1, 1, -1)]
-
-    # Nur 1-2 zusätzliche Samples für Performance
-    for i in range(min(2, len(sample_offsets))):
-        dx, dy, dz = sample_offsets[i]
-        nx = x + dx
-        ny = y + dy
-        nz = z + dz
-
-        if 0 <= nx < size_x and 0 <= ny < max_height and 0 <= nz < size_z:
-            light_sum += light_map[nx, ny, nz, channel]
-            count += 1
-
-    return light_sum / max(count, 1)
-
-
-@jit(nopython=True, cache=True)
 def generate_face_culling_mesh_v6(cx, cz, block_data, light_map):
     """
-    Generiert das Mesh mit Beleuchtung.
-    NEU: 7 Floats pro Vertex (x, y, z, u, v, texid, light)
+    Generiert das Mesh mit Minecraft-genauem Smooth Lighting.
+    7 Floats pro Vertex (x, y, z, u, v, texid, light)
     """
     MAX_FACES = CHUNK_SIZE * CHUNK_SIZE * MAX_HEIGHT * 6
-    MAX_VERTS = MAX_FACES * 4 * 7  # 7 statt 6!
+    MAX_VERTS = MAX_FACES * 4 * 7
     vertices = np.empty(MAX_VERTS, dtype=np.float32)
     indices = np.empty(MAX_FACES * 6, dtype=np.uint32)
 
@@ -148,10 +100,15 @@ def generate_face_culling_mesh_v6(cx, cz, block_data, light_map):
                             uv_u = CUBE_UVS[i_face, i_vert, 0]
                             uv_v = CUBE_UVS[i_face, i_vert, 1]
 
-                            # NEU: Berechne Lichtlevel für diesen Vertex
+                            # Berechne Minecraft-genaues Smooth Lighting für diesen Vertex
+                            sunlight = calculate_minecraft_vertex_light(
+                                light_map, block_data, x, y, z, i_face, i_vert, 0
+                            )
+                            blocklight = calculate_minecraft_vertex_light(
+                                light_map, block_data, x, y, z, i_face, i_vert, 1
+                            )
+
                             # Kombiniere Sonnen- und Blocklicht (nimm Maximum)
-                            sunlight = get_vertex_light(light_map, x, y, z, i_face, i_vert, 0)
-                            blocklight = get_vertex_light(light_map, x, y, z, i_face, i_vert, 1)
                             combined_light = max(sunlight, blocklight)
 
                             # Schreibe Vertex-Daten (7 Floats)
@@ -161,9 +118,9 @@ def generate_face_culling_mesh_v6(cx, cz, block_data, light_map):
                             vertices[start_vert_idx + 3] = uv_u
                             vertices[start_vert_idx + 4] = uv_v
                             vertices[start_vert_idx + 5] = texture_index
-                            vertices[start_vert_idx + 6] = combined_light  # NEU!
+                            vertices[start_vert_idx + 6] = combined_light
 
-                            start_vert_idx += 7  # 7 statt 6!
+                            start_vert_idx += 7
 
                         vert_count += 28  # 4 Vertices * 7 Floats
 
@@ -179,6 +136,6 @@ def generate_face_culling_mesh_v6(cx, cz, block_data, light_map):
                         index_offset += 4
 
     return (
-        vertices[:vert_count].reshape(-1, 7),  # 7 statt 6!
+        vertices[:vert_count].reshape(-1, 7),
         indices[:index_count]
     )
