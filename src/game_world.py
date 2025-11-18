@@ -13,7 +13,7 @@ from src.opengl_core import (
 )
 from src.chunk_mesh import block_data_worker_wrapper, mesh_worker_wrapper
 from src.player import Player
-from src.lighting_system import LightingSystem  # NEU!
+from src.lighting_system import LightingSystem
 
 # Globale Thread-Konstante
 THREAD_POOL_SIZE = 4
@@ -221,6 +221,9 @@ class GameWorld:
                     delete_chunk_buffers(vao, vbo, ebo)
                     del self.chunk_data[r_coord]
 
+                # WICHTIG: Synchronisiere Licht-Padding vor dem Re-Meshing
+                self.lighting.sync_light_padding(r_coord, self.world_data)
+
                 # NEU: Hole Light-Map für Re-Meshing
                 light_map = self.lighting.light_data.get(r_coord, None)
                 if light_map is not None:
@@ -278,6 +281,15 @@ class GameWorld:
 
                     # NEU: Initialisiere Beleuchtung für neuen Chunk
                     self.lighting.init_chunk_lighting(coord, result)
+
+                    # WICHTIG: Synchronisiere Licht-Padding mit Nachbarn
+                    self.lighting.sync_light_padding(coord, self.world_data)
+
+                    # Synchronisiere auch die Nachbarn zurück
+                    cx, cz = coord
+                    for neighbor_coord in [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)]:
+                        if neighbor_coord in self.lighting.light_data:
+                            self.lighting.sync_light_padding(neighbor_coord, self.world_data)
 
                 except Exception as e:
                     print(f"BlockData-Fehler für {coord}: {e}")
