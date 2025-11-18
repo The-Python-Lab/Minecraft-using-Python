@@ -1,4 +1,4 @@
-# --- src/lighting_system.py (KORRIGIERT FÜR CHUNK-GRENZEN) ---
+# --- src/lighting_system.py (MINECRAFT-GENAU MIT AO) ---
 import numpy as np
 from collections import deque
 from numba import jit
@@ -20,12 +20,13 @@ LIGHT_DIRECTIONS = np.array([
 
 
 class LightingSystem:
-    """Verwaltet Sonnen- und Blocklicht für Chunks mit Nachbar-Synchronisation."""
+    """Verwaltet Sonnen- und Blocklicht für Chunks mit perfekter Chunk-Grenzen-Synchronisation."""
 
     def __init__(self, chunk_size, max_height):
         self.chunk_size = chunk_size
         self.max_height = max_height
         self.light_data = {}  # {(cx, cz): np.array}
+        self.chunks_need_remesh = set()  # Chunks die re-meshed werden müssen
 
     def init_chunk_lighting(self, coord, block_data):
         """Initialisiert die Beleuchtung für einen neuen Chunk."""
@@ -123,6 +124,12 @@ class LightingSystem:
         elif old_block_id == -1.0 and new_block_id != -1.0:
             self._handle_light_decrease(light_map, block_data, local_x, y, local_z)
 
+        # Markiere diesen und alle Nachbar-Chunks für Re-Mesh
+        self.chunks_need_remesh.add(coord)
+        cx, cz = coord
+        for ncx, ncz in [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)]:
+            self.chunks_need_remesh.add((ncx, ncz))
+
     def _handle_light_increase(self, light_map, block_data, x, y, z):
         """Wenn ein Block entfernt wird, propagiere Licht hinein."""
         max_neighbor_sunlight = 0
@@ -152,12 +159,10 @@ class LightingSystem:
         light_map[x, y, z, SUNLIGHT_CHANNEL] = 0
         light_map[x, y, z, BLOCKLIGHT_CHANNEL] = 0
 
-    # ========== NEUE FUNKTIONEN FÜR CHUNK-GRENZEN ==========
-
     def sync_light_padding(self, coord, world_data):
         """
         Synchronisiert das Licht-Padding mit Nachbar-Chunks.
-        Muss aufgerufen werden, nachdem alle Nachbarn geladen sind!
+        KRITISCH: Muss nach jedem Chunk-Update aufgerufen werden!
         """
         if coord not in self.light_data:
             return
@@ -167,10 +172,10 @@ class LightingSystem:
 
         # Synchronisiere mit allen 4 Nachbarn
         neighbors = [
-            ((cx - 1, cz), 'left'),  # Linker Nachbar
-            ((cx + 1, cz), 'right'),  # Rechter Nachbar
-            ((cx, cz - 1), 'back'),  # Hinterer Nachbar
-            ((cx, cz + 1), 'front')  # Vorderer Nachbar
+            ((cx - 1, cz), 'left'),
+            ((cx + 1, cz), 'right'),
+            ((cx, cz - 1), 'back'),
+            ((cx, cz + 1), 'front')
         ]
 
         for neighbor_coord, direction in neighbors:
@@ -181,20 +186,30 @@ class LightingSystem:
 
             # Kopiere Lichtdaten vom Nachbarn in unser Padding
             if direction == 'left':  # Nachbar links (-X)
-                # Kopiere rechte Kante des Nachbarn in unsere linke Padding-Spalte
                 light_map[0, :, 1:-1, :] = neighbor_light[self.chunk_size, :, 1:-1, :]
 
             elif direction == 'right':  # Nachbar rechts (+X)
-                # Kopiere linke Kante des Nachbarn in unsere rechte Padding-Spalte
                 light_map[self.chunk_size + 1, :, 1:-1, :] = neighbor_light[1, :, 1:-1, :]
 
             elif direction == 'back':  # Nachbar hinten (-Z)
-                # Kopiere vordere Kante des Nachbarn in unser hinteres Padding
                 light_map[1:-1, :, 0, :] = neighbor_light[1:-1, :, self.chunk_size, :]
 
             elif direction == 'front':  # Nachbar vorne (+Z)
-                # Kopiere hintere Kante des Nachbarn in unser vorderes Padding
                 light_map[1:-1, :, self.chunk_size + 1, :] = neighbor_light[1:-1, :, 1, :]
+
+    def sync_all_chunk_boundaries(self, world_data):
+        """
+        Synchronisiert ALLE Chunk-Grenzen im gesamten Licht-System.
+        Sollte aufgerufen werden nach großen Updates.
+        """
+        for coord in list(self.light_data.keys()):
+            self.sync_light_padding(coord, world_data)
+
+    def get_chunks_needing_remesh(self):
+        """Gibt die Chunks zurück, die re-meshed werden müssen und leert die Liste."""
+        chunks = self.chunks_need_remesh.copy()
+        self.chunks_need_remesh.clear()
+        return chunks
 
     def get_light_at_position(self, coord, x, y, z):
         """Gibt das Lichtlevel an einer Position zurück."""
@@ -216,71 +231,126 @@ class LightingSystem:
 
 
 @jit(nopython=True, cache=True)
-def calculate_smooth_lighting(light_map, x, y, z, face_index, channel):
-    """Berechnet Smooth Lighting für die 4 Vertices einer Face."""
-    vertex_lights = np.zeros(4, dtype=np.float32)
-
-    # Face-Normale bestimmen
-    if face_index == 0:  # Top (+Y)
-        offsets = [
-            [(0, 1, 0), (-1, 1, 0), (-1, 1, -1), (0, 1, -1)],
-            [(0, 1, 0), (-1, 1, 0), (-1, 1, 1), (0, 1, 1)],
-            [(0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)],
-            [(0, 1, 0), (1, 1, 0), (1, 1, -1), (0, 1, -1)]
-        ]
-    elif face_index == 1:  # Bottom (-Y)
-        offsets = [
-            [(0, -1, 0), (-1, -1, 0), (-1, -1, -1), (0, -1, -1)],
-            [(0, -1, 0), (1, -1, 0), (1, -1, -1), (0, -1, -1)],
-            [(0, -1, 0), (1, -1, 0), (1, -1, 1), (0, -1, 1)],
-            [(0, -1, 0), (-1, -1, 0), (-1, -1, 1), (0, -1, 1)]
-        ]
-    elif face_index == 2:  # Left (-X)
-        offsets = [
-            [(-1, 0, 0), (-1, -1, 0), (-1, -1, -1), (-1, 0, -1)],
-            [(-1, 0, 0), (-1, 1, 0), (-1, 1, -1), (-1, 0, -1)],
-            [(-1, 0, 0), (-1, 1, 0), (-1, 1, 1), (-1, 0, 1)],
-            [(-1, 0, 0), (-1, -1, 0), (-1, -1, 1), (-1, 0, 1)]
-        ]
-    elif face_index == 3:  # Right (+X)
-        offsets = [
-            [(1, 0, 0), (1, -1, 0), (1, -1, -1), (1, 0, -1)],
-            [(1, 0, 0), (1, -1, 0), (1, -1, 1), (1, 0, 1)],
-            [(1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1)],
-            [(1, 0, 0), (1, 1, 0), (1, 1, -1), (1, 0, -1)]
-        ]
-    elif face_index == 4:  # Front (+Z)
-        offsets = [
-            [(0, 0, 1), (-1, 0, 1), (-1, -1, 1), (0, -1, 1)],
-            [(0, 0, 1), (-1, 0, 1), (-1, 1, 1), (0, 1, 1)],
-            [(0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)],
-            [(0, 0, 1), (1, 0, 1), (1, -1, 1), (0, -1, 1)]
-        ]
-    else:  # Back (-Z)
-        offsets = [
-            [(0, 0, -1), (-1, 0, -1), (-1, -1, -1), (0, -1, -1)],
-            [(0, 0, -1), (-1, 0, -1), (-1, 1, -1), (0, 1, -1)],
-            [(0, 0, -1), (1, 0, -1), (1, 1, -1), (0, 1, -1)],
-            [(0, 0, -1), (1, 0, -1), (1, -1, -1), (0, -1, -1)]
-        ]
-
+def calculate_minecraft_vertex_light(light_map, block_data, x, y, z, face_index, vertex_index, channel):
+    """
+    Berechnet Minecraft-genaues Smooth Lighting mit Ambient Occlusion.
+    Verwendet die 4 Blöcke, die einen Vertex umgeben.
+    """
     max_height = light_map.shape[1]
     size_x = light_map.shape[0]
     size_z = light_map.shape[2]
 
-    for v in range(4):
-        light_sum = 0.0
-        count = 0
+    # Vertex-Offsets für jede Face (Minecraft-Stil)
+    # Format: [corner, side1, side2, diagonal]
 
-        for dx, dy, dz in offsets[v]:
-            nx = x + dx
-            ny = y + dy
-            nz = z + dz
+    if face_index == 0:  # Top (+Y)
+        offsets = [
+            # Vertex 0: Back-Left
+            [(0, 1, 0), (-1, 1, 0), (0, 1, -1), (-1, 1, -1)],
+            # Vertex 1: Back-Right
+            [(0, 1, 0), (0, 1, -1), (1, 1, 0), (1, 1, -1)],
+            # Vertex 2: Front-Right
+            [(0, 1, 0), (1, 1, 0), (0, 1, 1), (1, 1, 1)],
+            # Vertex 3: Front-Left
+            [(0, 1, 0), (0, 1, 1), (-1, 1, 0), (-1, 1, 1)]
+        ]
+    elif face_index == 1:  # Bottom (-Y)
+        offsets = [
+            [(0, -1, 0), (-1, -1, 0), (0, -1, -1), (-1, -1, -1)],
+            [(0, -1, 0), (1, -1, 0), (0, -1, -1), (1, -1, -1)],
+            [(0, -1, 0), (1, -1, 0), (0, -1, 1), (1, -1, 1)],
+            [(0, -1, 0), (0, -1, 1), (-1, -1, 0), (-1, -1, 1)]
+        ]
+    elif face_index == 2:  # Left (-X)
+        offsets = [
+            [(-1, 0, 0), (-1, -1, 0), (-1, 0, -1), (-1, -1, -1)],
+            [(-1, 0, 0), (-1, 1, 0), (-1, 0, -1), (-1, 1, -1)],
+            [(-1, 0, 0), (-1, 1, 0), (-1, 0, 1), (-1, 1, 1)],
+            [(-1, 0, 0), (-1, 0, 1), (-1, -1, 0), (-1, -1, 1)]
+        ]
+    elif face_index == 3:  # Right (+X)
+        offsets = [
+            [(1, 0, 0), (1, -1, 0), (1, 0, -1), (1, -1, -1)],
+            [(1, 0, 0), (1, 0, -1), (1, -1, 0), (1, -1, 1)],
+            [(1, 0, 0), (1, 1, 0), (1, 0, 1), (1, 1, 1)],
+            [(1, 0, 0), (1, 1, 0), (1, 0, -1), (1, 1, -1)]
+        ]
+    elif face_index == 4:  # Front (+Z)
+        offsets = [
+            [(0, 0, 1), (-1, 0, 1), (0, -1, 1), (-1, -1, 1)],
+            [(0, 0, 1), (-1, 0, 1), (0, 1, 1), (-1, 1, 1)],
+            [(0, 0, 1), (1, 0, 1), (0, 1, 1), (1, 1, 1)],
+            [(0, 0, 1), (1, 0, 1), (0, -1, 1), (1, -1, 1)]
+        ]
+    else:  # Back (-Z)
+        offsets = [
+            [(0, 0, -1), (-1, 0, -1), (0, -1, -1), (-1, -1, -1)],
+            [(0, 0, -1), (0, -1, -1), (-1, 0, -1), (-1, 1, -1)],
+            [(0, 0, -1), (1, 0, -1), (0, 1, -1), (1, 1, -1)],
+            [(0, 0, -1), (1, 0, -1), (0, -1, -1), (1, -1, -1)]
+        ]
 
-            if 0 <= nx < size_x and 0 <= ny < max_height and 0 <= nz < size_z:
-                light_sum += light_map[nx, ny, nz, channel]
-                count += 1
+    # Hole die Offsets für diesen Vertex
+    vertex_offsets = offsets[vertex_index]
 
-        vertex_lights[v] = light_sum / max(count, 1)
+    # Sample Licht von den 4 umliegenden Blöcken
+    light_values = []
+    ao_count = 0
 
-    return vertex_lights
+    for dx, dy, dz in vertex_offsets:
+        nx = x + dx
+        ny = y + dy
+        nz = z + dz
+
+        # Bounds check
+        if 0 <= nx < size_x and 0 <= ny < max_height and 0 <= nz < size_z:
+            light_val = light_map[nx, ny, nz, channel]
+            light_values.append(float(light_val))
+
+            # AO: Prüfe ob Block solid ist
+            if nx < size_x and ny < max_height and nz < size_z:
+                block_id = block_data[nx, ny, nz]
+                if block_id != -1.0 and block_id != 4.0:  # Nicht Luft oder Blätter
+                    ao_count += 1
+        else:
+            light_values.append(15.0)  # Außerhalb = volle Helligkeit
+
+    # Minecraft AO Formula
+    # Wenn 2 Seiten blockiert sind, oder 3 Blöcke: Dunkler
+    if len(light_values) >= 3:
+        side1_blocked = block_data[x + vertex_offsets[1][0],
+                                   y + vertex_offsets[1][1],
+                                   z + vertex_offsets[1][2]] not in [-1.0, 4.0] if (
+                0 <= x + vertex_offsets[1][0] < size_x and
+                0 <= y + vertex_offsets[1][1] < max_height and
+                0 <= z + vertex_offsets[1][2] < size_z) else False
+
+        side2_blocked = block_data[x + vertex_offsets[2][0],
+                                   y + vertex_offsets[2][1],
+                                   z + vertex_offsets[2][2]] not in [-1.0, 4.0] if (
+                0 <= x + vertex_offsets[2][0] < size_x and
+                0 <= y + vertex_offsets[2][1] < max_height and
+                0 <= z + vertex_offsets[2][2] < size_z) else False
+
+        # Minecraft AO Berechnung
+        if side1_blocked and side2_blocked:
+            ao_factor = 0.6  # Dunkle Ecke
+        elif ao_count >= 3:
+            ao_factor = 0.7
+        elif ao_count == 2:
+            ao_factor = 0.8
+        elif ao_count == 1:
+            ao_factor = 0.9
+        else:
+            ao_factor = 1.0
+    else:
+        ao_factor = 1.0
+
+    # Durchschnitt des Lichts
+    if len(light_values) > 0:
+        avg_light = sum(light_values) / len(light_values)
+    else:
+        avg_light = 15.0
+
+    # Kombiniere Licht mit AO
+    return avg_light * ao_factor
