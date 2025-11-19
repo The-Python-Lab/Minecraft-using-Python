@@ -234,60 +234,80 @@ class LightingSystem:
 def calculate_minecraft_vertex_light(light_map, block_data, x, y, z, face_index, vertex_index, channel):
     """
     Berechnet Minecraft-genaues Smooth Lighting mit Ambient Occlusion.
-    Verwendet die 4 Blöcke, die einen Vertex umgeben.
+    KORRIGIERT: Vertex-Reihenfolge stimmt jetzt mit CUBE_VERTICES überein!
     """
     max_height = light_map.shape[1]
     size_x = light_map.shape[0]
     size_z = light_map.shape[2]
 
-    # Vertex-Offsets für jede Face (Minecraft-Stil)
-    # Format: [corner, side1, side2, diagonal]
+    # Vertex-Offsets basierend auf CUBE_VERTICES-Reihenfolge
+    # CUBE_VERTICES Format: [x, y, z] wobei Block bei (x, y, z) steht
 
     if face_index == 0:  # Top (+Y)
+        # Vertex 0: [0, 1, 0] = hinten links
+        # Vertex 1: [0, 1, 1] = vorne links
+        # Vertex 2: [1, 1, 1] = vorne rechts
+        # Vertex 3: [1, 1, 0] = hinten rechts
         offsets = [
-            # Vertex 0: Back-Left
-            [(0, 1, 0), (-1, 1, 0), (0, 1, -1), (-1, 1, -1)],
-            # Vertex 1: Back-Right
-            [(0, 1, 0), (0, 1, -1), (1, 1, 0), (1, 1, -1)],
-            # Vertex 2: Front-Right
-            [(0, 1, 0), (1, 1, 0), (0, 1, 1), (1, 1, 1)],
-            # Vertex 3: Front-Left
-            [(0, 1, 0), (0, 1, 1), (-1, 1, 0), (-1, 1, 1)]
+            [(0, 1, 0), (-1, 1, 0), (0, 1, -1), (-1, 1, -1)],  # hinten links
+            [(0, 1, 0), (-1, 1, 0), (0, 1, 1), (-1, 1, 1)],  # vorne links
+            [(0, 1, 0), (1, 1, 0), (0, 1, 1), (1, 1, 1)],  # vorne rechts
+            [(0, 1, 0), (1, 1, 0), (0, 1, -1), (1, 1, -1)]  # hinten rechts
         ]
     elif face_index == 1:  # Bottom (-Y)
+        # Vertex 0: [0, 0, 0] = hinten links
+        # Vertex 1: [1, 0, 0] = hinten rechts
+        # Vertex 2: [1, 0, 1] = vorne rechts
+        # Vertex 3: [0, 0, 1] = vorne links
         offsets = [
-            [(0, -1, 0), (-1, -1, 0), (0, -1, -1), (-1, -1, -1)],
-            [(0, -1, 0), (1, -1, 0), (0, -1, -1), (1, -1, -1)],
-            [(0, -1, 0), (1, -1, 0), (0, -1, 1), (1, -1, 1)],
-            [(0, -1, 0), (0, -1, 1), (-1, -1, 0), (-1, -1, 1)]
+            [(0, -1, 0), (-1, -1, 0), (0, -1, -1), (-1, -1, -1)],  # hinten links
+            [(0, -1, 0), (1, -1, 0), (0, -1, -1), (1, -1, -1)],  # hinten rechts
+            [(0, -1, 0), (1, -1, 0), (0, -1, 1), (1, -1, 1)],  # vorne rechts
+            [(0, -1, 0), (-1, -1, 0), (0, -1, 1), (-1, -1, 1)]  # vorne links
         ]
     elif face_index == 2:  # Left (-X)
+        # Vertex 0: [0, 0, 0] = unten hinten
+        # Vertex 1: [0, 1, 0] = oben hinten
+        # Vertex 2: [0, 1, 1] = oben vorne
+        # Vertex 3: [0, 0, 1] = unten vorne
         offsets = [
-            [(-1, 0, 0), (-1, -1, 0), (-1, 0, -1), (-1, -1, -1)],
-            [(-1, 0, 0), (-1, 1, 0), (-1, 0, -1), (-1, 1, -1)],
-            [(-1, 0, 0), (-1, 1, 0), (-1, 0, 1), (-1, 1, 1)],
-            [(-1, 0, 0), (-1, 0, 1), (-1, -1, 0), (-1, -1, 1)]
+            [(-1, 0, 0), (-1, -1, 0), (-1, 0, -1), (-1, -1, -1)],  # unten hinten
+            [(-1, 0, 0), (-1, 1, 0), (-1, 0, -1), (-1, 1, -1)],  # oben hinten
+            [(-1, 0, 0), (-1, 1, 0), (-1, 0, 1), (-1, 1, 1)],  # oben vorne
+            [(-1, 0, 0), (-1, -1, 0), (-1, 0, 1), (-1, -1, 1)]  # unten vorne
         ]
     elif face_index == 3:  # Right (+X)
+        # Vertex 0: [1, 0, 0] = unten hinten
+        # Vertex 1: [1, 0, 1] = unten vorne
+        # Vertex 2: [1, 1, 1] = oben vorne
+        # Vertex 3: [1, 1, 0] = oben hinten
         offsets = [
-            [(1, 0, 0), (1, -1, 0), (1, 0, -1), (1, -1, -1)],
-            [(1, 0, 0), (1, 0, -1), (1, -1, 0), (1, -1, 1)],
-            [(1, 0, 0), (1, 1, 0), (1, 0, 1), (1, 1, 1)],
-            [(1, 0, 0), (1, 1, 0), (1, 0, -1), (1, 1, -1)]
+            [(1, 0, 0), (1, -1, 0), (1, 0, -1), (1, -1, -1)],  # unten hinten
+            [(1, 0, 0), (1, -1, 0), (1, 0, 1), (1, -1, 1)],  # unten vorne
+            [(1, 0, 0), (1, 1, 0), (1, 0, 1), (1, 1, 1)],  # oben vorne
+            [(1, 0, 0), (1, 1, 0), (1, 0, -1), (1, 1, -1)]  # oben hinten
         ]
     elif face_index == 4:  # Front (+Z)
+        # Vertex 0: [0, 0, 1] = unten links
+        # Vertex 1: [0, 1, 1] = oben links
+        # Vertex 2: [1, 1, 1] = oben rechts
+        # Vertex 3: [1, 0, 1] = unten rechts
         offsets = [
-            [(0, 0, 1), (-1, 0, 1), (0, -1, 1), (-1, -1, 1)],
-            [(0, 0, 1), (-1, 0, 1), (0, 1, 1), (-1, 1, 1)],
-            [(0, 0, 1), (1, 0, 1), (0, 1, 1), (1, 1, 1)],
-            [(0, 0, 1), (1, 0, 1), (0, -1, 1), (1, -1, 1)]
+            [(0, 0, 1), (-1, 0, 1), (0, -1, 1), (-1, -1, 1)],  # unten links
+            [(0, 0, 1), (-1, 0, 1), (0, 1, 1), (-1, 1, 1)],  # oben links
+            [(0, 0, 1), (1, 0, 1), (0, 1, 1), (1, 1, 1)],  # oben rechts
+            [(0, 0, 1), (1, 0, 1), (0, -1, 1), (1, -1, 1)]  # unten rechts
         ]
-    else:  # Back (-Z)
+    else:  # Back (-Z) face_index == 5
+        # Vertex 0: [0, 0, 0] = unten links
+        # Vertex 1: [0, 1, 0] = oben links
+        # Vertex 2: [1, 1, 0] = oben rechts
+        # Vertex 3: [1, 0, 0] = unten rechts
         offsets = [
-            [(0, 0, -1), (-1, 0, -1), (0, -1, -1), (-1, -1, -1)],
-            [(0, 0, -1), (0, -1, -1), (-1, 0, -1), (-1, 1, -1)],
-            [(0, 0, -1), (1, 0, -1), (0, 1, -1), (1, 1, -1)],
-            [(0, 0, -1), (1, 0, -1), (0, -1, -1), (1, -1, -1)]
+            [(0, 0, -1), (-1, 0, -1), (0, -1, -1), (-1, -1, -1)],  # unten links
+            [(0, 0, -1), (-1, 0, -1), (0, 1, -1), (-1, 1, -1)],  # oben links
+            [(0, 0, -1), (1, 0, -1), (0, 1, -1), (1, 1, -1)],  # oben rechts
+            [(0, 0, -1), (1, 0, -1), (0, -1, -1), (1, -1, -1)]  # unten rechts
         ]
 
     # Hole die Offsets für diesen Vertex
