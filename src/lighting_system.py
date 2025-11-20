@@ -1,4 +1,4 @@
-# --- src/lighting_system.py (MINECRAFT-GENAU MIT AO) ---
+# --- src/lighting_system.py (SYSTEMATISCH KORRIGIERT) ---
 import numpy as np
 from collections import deque
 from numba import jit
@@ -26,7 +26,6 @@ class LightingSystem:
         self.chunk_size = chunk_size
         self.max_height = max_height
         self.light_data = {}  # {(cx, cz): np.array}
-        self.chunks_need_remesh = set()  # Chunks die re-meshed werden müssen
 
     def init_chunk_lighting(self, coord, block_data):
         """Initialisiert die Beleuchtung für einen neuen Chunk."""
@@ -124,12 +123,6 @@ class LightingSystem:
         elif old_block_id == -1.0 and new_block_id != -1.0:
             self._handle_light_decrease(light_map, block_data, local_x, y, local_z)
 
-        # Markiere diesen und alle Nachbar-Chunks für Re-Mesh
-        self.chunks_need_remesh.add(coord)
-        cx, cz = coord
-        for ncx, ncz in [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)]:
-            self.chunks_need_remesh.add((ncx, ncz))
-
     def _handle_light_increase(self, light_map, block_data, x, y, z):
         """Wenn ein Block entfernt wird, propagiere Licht hinein."""
         max_neighbor_sunlight = 0
@@ -197,180 +190,129 @@ class LightingSystem:
             elif direction == 'front':  # Nachbar vorne (+Z)
                 light_map[1:-1, :, self.chunk_size + 1, :] = neighbor_light[1:-1, :, 1, :]
 
-    def sync_all_chunk_boundaries(self, world_data):
-        """
-        Synchronisiert ALLE Chunk-Grenzen im gesamten Licht-System.
-        Sollte aufgerufen werden nach großen Updates.
-        """
-        for coord in list(self.light_data.keys()):
-            self.sync_light_padding(coord, world_data)
-
-    def get_chunks_needing_remesh(self):
-        """Gibt die Chunks zurück, die re-meshed werden müssen und leert die Liste."""
-        chunks = self.chunks_need_remesh.copy()
-        self.chunks_need_remesh.clear()
-        return chunks
-
-    def get_light_at_position(self, coord, x, y, z):
-        """Gibt das Lichtlevel an einer Position zurück."""
-        if coord not in self.light_data:
-            return MAX_LIGHT_LEVEL, 0
-
-        light_map = self.light_data[coord]
-        local_x = x + 1
-        local_z = z + 1
-
-        if (0 < local_x < self.chunk_size + 1 and
-                0 <= y < self.max_height and
-                0 < local_z < self.chunk_size + 1):
-            sunlight = light_map[local_x, y, local_z, SUNLIGHT_CHANNEL]
-            blocklight = light_map[local_x, y, local_z, BLOCKLIGHT_CHANNEL]
-            return sunlight, blocklight
-
-        return MAX_LIGHT_LEVEL, 0
-
 
 @jit(nopython=True, cache=True)
 def calculate_minecraft_vertex_light(light_map, block_data, x, y, z, face_index, vertex_index, channel):
     """
-    Berechnet Minecraft-genaues Smooth Lighting mit Ambient Occlusion.
-    KORRIGIERT: Vertex-Reihenfolge stimmt jetzt mit CUBE_VERTICES überein!
+    KOMPLETT NEU: Systematische Berechnung basierend auf Vertex-Position.
+    Samplet die 4 Blöcke um einen Vertex herum.
     """
     max_height = light_map.shape[1]
     size_x = light_map.shape[0]
     size_z = light_map.shape[2]
 
-    # Vertex-Offsets basierend auf CUBE_VERTICES-Reihenfolge
-    # CUBE_VERTICES Format: [x, y, z] wobei Block bei (x, y, z) steht
+    # Bestimme die Vertex-Position relativ zum Block (0.0 oder 1.0 auf jeder Achse)
+    # Basierend auf CUBE_VERTICES aus geometry_constants.py
 
-    if face_index == 0:  # Top (+Y)
-        # Vertex 0: [0, 1, 0] = hinten links
-        # Vertex 1: [0, 1, 1] = vorne links
-        # Vertex 2: [1, 1, 1] = vorne rechts
-        # Vertex 3: [1, 1, 0] = hinten rechts
-        offsets = [
-            [(0, 1, 0), (-1, 1, 0), (0, 1, -1), (-1, 1, -1)],  # hinten links
-            [(0, 1, 0), (-1, 1, 0), (0, 1, 1), (-1, 1, 1)],  # vorne links
-            [(0, 1, 0), (1, 1, 0), (0, 1, 1), (1, 1, 1)],  # vorne rechts
-            [(0, 1, 0), (1, 1, 0), (0, 1, -1), (1, 1, -1)]  # hinten rechts
+    # Face 0: Top (+Y) - Vertices: [0,1,0], [0,1,1], [1,1,1], [1,1,0]
+    if face_index == 0:
+        vertex_positions = [
+            (0.0, 1.0, 0.0),  # Vertex 0
+            (0.0, 1.0, 1.0),  # Vertex 1
+            (1.0, 1.0, 1.0),  # Vertex 2
+            (1.0, 1.0, 0.0)  # Vertex 3
         ]
-    elif face_index == 1:  # Bottom (-Y)
-        # Vertex 0: [0, 0, 0] = hinten links
-        # Vertex 1: [1, 0, 0] = hinten rechts
-        # Vertex 2: [1, 0, 1] = vorne rechts
-        # Vertex 3: [0, 0, 1] = vorne links
-        offsets = [
-            [(0, -1, 0), (-1, -1, 0), (0, -1, -1), (-1, -1, -1)],  # hinten links
-            [(0, -1, 0), (1, -1, 0), (0, -1, -1), (1, -1, -1)],  # hinten rechts
-            [(0, -1, 0), (1, -1, 0), (0, -1, 1), (1, -1, 1)],  # vorne rechts
-            [(0, -1, 0), (-1, -1, 0), (0, -1, 1), (-1, -1, 1)]  # vorne links
+    # Face 1: Bottom (-Y) - Vertices: [0,0,0], [1,0,0], [1,0,1], [0,0,1]
+    elif face_index == 1:
+        vertex_positions = [
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (1.0, 0.0, 1.0),
+            (0.0, 0.0, 1.0)
         ]
-    elif face_index == 2:  # Left (-X)
-        # Vertex 0: [0, 0, 0] = unten hinten
-        # Vertex 1: [0, 1, 0] = oben hinten
-        # Vertex 2: [0, 1, 1] = oben vorne
-        # Vertex 3: [0, 0, 1] = unten vorne
-        offsets = [
-            [(-1, 0, 0), (-1, -1, 0), (-1, 0, -1), (-1, -1, -1)],  # unten hinten
-            [(-1, 0, 0), (-1, 1, 0), (-1, 0, -1), (-1, 1, -1)],  # oben hinten
-            [(-1, 0, 0), (-1, 1, 0), (-1, 0, 1), (-1, 1, 1)],  # oben vorne
-            [(-1, 0, 0), (-1, -1, 0), (-1, 0, 1), (-1, -1, 1)]  # unten vorne
+    # Face 2: Left (-X) - Vertices: [0,0,0], [0,1,0], [0,1,1], [0,0,1]
+    elif face_index == 2:
+        vertex_positions = [
+            (0.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 1.0, 1.0),
+            (0.0, 0.0, 1.0)
         ]
-    elif face_index == 3:  # Right (+X)
-        # Vertex 0: [1, 0, 0] = unten hinten
-        # Vertex 1: [1, 0, 1] = unten vorne
-        # Vertex 2: [1, 1, 1] = oben vorne
-        # Vertex 3: [1, 1, 0] = oben hinten
-        offsets = [
-            [(1, 0, 0), (1, -1, 0), (1, 0, -1), (1, -1, -1)],  # unten hinten
-            [(1, 0, 0), (1, -1, 0), (1, 0, 1), (1, -1, 1)],  # unten vorne
-            [(1, 0, 0), (1, 1, 0), (1, 0, 1), (1, 1, 1)],  # oben vorne
-            [(1, 0, 0), (1, 1, 0), (1, 0, -1), (1, 1, -1)]  # oben hinten
+    # Face 3: Right (+X) - Vertices: [1,0,0], [1,0,1], [1,1,1], [1,1,0]
+    elif face_index == 3:
+        vertex_positions = [
+            (1.0, 0.0, 0.0),
+            (1.0, 0.0, 1.0),
+            (1.0, 1.0, 1.0),
+            (1.0, 1.0, 0.0)
         ]
-    elif face_index == 4:  # Front (+Z)
-        # Vertex 0: [0, 0, 1] = unten links
-        # Vertex 1: [0, 1, 1] = oben links
-        # Vertex 2: [1, 1, 1] = oben rechts
-        # Vertex 3: [1, 0, 1] = unten rechts
-        offsets = [
-            [(0, 0, 1), (-1, 0, 1), (0, -1, 1), (-1, -1, 1)],  # unten links
-            [(0, 0, 1), (-1, 0, 1), (0, 1, 1), (-1, 1, 1)],  # oben links
-            [(0, 0, 1), (1, 0, 1), (0, 1, 1), (1, 1, 1)],  # oben rechts
-            [(0, 0, 1), (1, 0, 1), (0, -1, 1), (1, -1, 1)]  # unten rechts
+    # Face 4: Front (+Z) - Vertices: [0,0,1], [0,1,1], [1,1,1], [1,0,1]
+    elif face_index == 4:
+        vertex_positions = [
+            (0.0, 0.0, 1.0),
+            (0.0, 1.0, 1.0),
+            (1.0, 1.0, 1.0),
+            (1.0, 0.0, 1.0)
         ]
-    else:  # Back (-Z) face_index == 5
-        # Vertex 0: [0, 0, 0] = unten links
-        # Vertex 1: [0, 1, 0] = oben links
-        # Vertex 2: [1, 1, 0] = oben rechts
-        # Vertex 3: [1, 0, 0] = unten rechts
-        offsets = [
-            [(0, 0, -1), (-1, 0, -1), (0, -1, -1), (-1, -1, -1)],  # unten links
-            [(0, 0, -1), (-1, 0, -1), (0, 1, -1), (-1, 1, -1)],  # oben links
-            [(0, 0, -1), (1, 0, -1), (0, 1, -1), (1, 1, -1)],  # oben rechts
-            [(0, 0, -1), (1, 0, -1), (0, -1, -1), (1, -1, -1)]  # unten rechts
+    # Face 5: Back (-Z) - Vertices: [0,0,0], [0,1,0], [1,1,0], [1,0,0]
+    else:
+        vertex_positions = [
+            (0.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (1.0, 1.0, 0.0),
+            (1.0, 0.0, 0.0)
         ]
 
-    # Hole die Offsets für diesen Vertex
-    vertex_offsets = offsets[vertex_index]
+    vx, vy, vz = vertex_positions[vertex_index]
 
-    # Sample Licht von den 4 umliegenden Blöcken
-    light_values = []
+    # Bestimme die 4 Sampling-Offsets basierend auf Vertex-Position
+    # Minecraft samplet: corner, side1, side2, diagonal
+    offsets = []
+
+    # Bestimme Richtungen für Sampling (wo der Vertex an Kanten liegt)
+    x_dir = -1 if vx == 0.0 else 1  # Nach links oder rechts
+    y_dir = -1 if vy == 0.0 else 1  # Nach unten oder oben
+    z_dir = -1 if vz == 0.0 else 1  # Nach hinten oder vorne
+
+    # Die 4 Blöcke um den Vertex:
+    # 1. Der Block an der Ecke (diagonal)
+    offsets.append((x_dir, y_dir, z_dir))
+
+    # 2-4. Die 3 angrenzenden Blöcke (entlang jeder Achse)
+    offsets.append((x_dir, 0, 0))  # Entlang X
+    offsets.append((0, y_dir, 0))  # Entlang Y
+    offsets.append((0, 0, z_dir))  # Entlang Z
+    offsets.append((x_dir, y_dir, 0))  # XY-Kante
+    offsets.append((x_dir, 0, z_dir))  # XZ-Kante
+    offsets.append((0, y_dir, z_dir))  # YZ-Kante
+
+    # Sample Licht von umliegenden Blöcken
+    light_sum = 0.0
+    count = 0
     ao_count = 0
 
-    for dx, dy, dz in vertex_offsets:
+    for dx, dy, dz in offsets:
         nx = x + dx
         ny = y + dy
         nz = z + dz
 
-        # Bounds check
         if 0 <= nx < size_x and 0 <= ny < max_height and 0 <= nz < size_z:
             light_val = light_map[nx, ny, nz, channel]
-            light_values.append(float(light_val))
+            light_sum += float(light_val)
+            count += 1
 
-            # AO: Prüfe ob Block solid ist
-            if nx < size_x and ny < max_height and nz < size_z:
-                block_id = block_data[nx, ny, nz]
-                if block_id != -1.0 and block_id != 4.0:  # Nicht Luft oder Blätter
-                    ao_count += 1
+            # AO: Zähle solide Blöcke
+            block_id = block_data[nx, ny, nz]
+            if block_id != -1.0 and block_id != 4.0:
+                ao_count += 1
         else:
-            light_values.append(15.0)  # Außerhalb = volle Helligkeit
+            # Außerhalb = volle Helligkeit
+            light_sum += 15.0
+            count += 1
 
-    # Minecraft AO Formula
-    # Wenn 2 Seiten blockiert sind, oder 3 Blöcke: Dunkler
-    if len(light_values) >= 3:
-        side1_blocked = block_data[x + vertex_offsets[1][0],
-                                   y + vertex_offsets[1][1],
-                                   z + vertex_offsets[1][2]] not in [-1.0, 4.0] if (
-                0 <= x + vertex_offsets[1][0] < size_x and
-                0 <= y + vertex_offsets[1][1] < max_height and
-                0 <= z + vertex_offsets[1][2] < size_z) else False
+    # Berechne Durchschnitt
+    avg_light = light_sum / max(count, 1) if count > 0 else 15.0
 
-        side2_blocked = block_data[x + vertex_offsets[2][0],
-                                   y + vertex_offsets[2][1],
-                                   z + vertex_offsets[2][2]] not in [-1.0, 4.0] if (
-                0 <= x + vertex_offsets[2][0] < size_x and
-                0 <= y + vertex_offsets[2][1] < max_height and
-                0 <= z + vertex_offsets[2][2] < size_z) else False
-
-        # Minecraft AO Berechnung
-        if side1_blocked and side2_blocked:
-            ao_factor = 0.6  # Dunkle Ecke
-        elif ao_count >= 3:
-            ao_factor = 0.7
-        elif ao_count == 2:
-            ao_factor = 0.8
-        elif ao_count == 1:
-            ao_factor = 0.9
-        else:
-            ao_factor = 1.0
+    # Minecraft-Style AO (einfacher)
+    if ao_count >= 4:
+        ao_factor = 0.6
+    elif ao_count == 3:
+        ao_factor = 0.75
+    elif ao_count == 2:
+        ao_factor = 0.85
+    elif ao_count == 1:
+        ao_factor = 0.95
     else:
         ao_factor = 1.0
 
-    # Durchschnitt des Lichts
-    if len(light_values) > 0:
-        avg_light = sum(light_values) / len(light_values)
-    else:
-        avg_light = 15.0
-
-    # Kombiniere Licht mit AO
     return avg_light * ao_factor
