@@ -1,4 +1,4 @@
-# --- src/lighting_system.py (SYSTEMATISCH KORRIGIERT) ---
+# --- src/lighting_system.py (LIGHTING-RICHTUNG KORRIGIERT) ---
 import numpy as np
 from collections import deque
 from numba import jit
@@ -194,87 +194,56 @@ class LightingSystem:
 @jit(nopython=True, cache=True)
 def calculate_minecraft_vertex_light(light_map, block_data, x, y, z, face_index, vertex_index, channel):
     """
-    KOMPLETT NEU: Systematische Berechnung basierend auf Vertex-Position.
-    Samplet die 4 Blöcke um einen Vertex herum.
+    KORRIGIERT: Samplet Licht von NACHBAR-Blöcken, nicht vom aktuellen Block.
+    Die Richtung ist jetzt invertiert.
     """
     max_height = light_map.shape[1]
     size_x = light_map.shape[0]
     size_z = light_map.shape[2]
 
     # Bestimme die Vertex-Position relativ zum Block (0.0 oder 1.0 auf jeder Achse)
-    # Basierend auf CUBE_VERTICES aus geometry_constants.py
-
-    # Face 0: Top (+Y) - Vertices: [0,1,0], [0,1,1], [1,1,1], [1,1,0]
-    if face_index == 0:
+    if face_index == 0:  # Top (+Y)
         vertex_positions = [
-            (0.0, 1.0, 0.0),  # Vertex 0
-            (0.0, 1.0, 1.0),  # Vertex 1
-            (1.0, 1.0, 1.0),  # Vertex 2
-            (1.0, 1.0, 0.0)  # Vertex 3
+            (0.0, 1.0, 0.0), (0.0, 1.0, 1.0), (1.0, 1.0, 1.0), (1.0, 1.0, 0.0)
         ]
-    # Face 1: Bottom (-Y) - Vertices: [0,0,0], [1,0,0], [1,0,1], [0,0,1]
-    elif face_index == 1:
+    elif face_index == 1:  # Bottom (-Y)
         vertex_positions = [
-            (0.0, 0.0, 0.0),
-            (1.0, 0.0, 0.0),
-            (1.0, 0.0, 1.0),
-            (0.0, 0.0, 1.0)
+            (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 1.0), (0.0, 0.0, 1.0)
         ]
-    # Face 2: Left (-X) - Vertices: [0,0,0], [0,1,0], [0,1,1], [0,0,1]
-    elif face_index == 2:
+    elif face_index == 2:  # Left (-X)
         vertex_positions = [
-            (0.0, 0.0, 0.0),
-            (0.0, 1.0, 0.0),
-            (0.0, 1.0, 1.0),
-            (0.0, 0.0, 1.0)
+            (0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 1.0), (0.0, 0.0, 1.0)
         ]
-    # Face 3: Right (+X) - Vertices: [1,0,0], [1,0,1], [1,1,1], [1,1,0]
-    elif face_index == 3:
+    elif face_index == 3:  # Right (+X)
         vertex_positions = [
-            (1.0, 0.0, 0.0),
-            (1.0, 0.0, 1.0),
-            (1.0, 1.0, 1.0),
-            (1.0, 1.0, 0.0)
+            (1.0, 0.0, 0.0), (1.0, 0.0, 1.0), (1.0, 1.0, 1.0), (1.0, 1.0, 0.0)
         ]
-    # Face 4: Front (+Z) - Vertices: [0,0,1], [0,1,1], [1,1,1], [1,0,1]
-    elif face_index == 4:
+    elif face_index == 4:  # Front (+Z)
         vertex_positions = [
-            (0.0, 0.0, 1.0),
-            (0.0, 1.0, 1.0),
-            (1.0, 1.0, 1.0),
-            (1.0, 0.0, 1.0)
+            (0.0, 0.0, 1.0), (0.0, 1.0, 1.0), (1.0, 1.0, 1.0), (1.0, 0.0, 1.0)
         ]
-    # Face 5: Back (-Z) - Vertices: [0,0,0], [0,1,0], [1,1,0], [1,0,0]
-    else:
+    else:  # Back (-Z)
         vertex_positions = [
-            (0.0, 0.0, 0.0),
-            (0.0, 1.0, 0.0),
-            (1.0, 1.0, 0.0),
-            (1.0, 0.0, 0.0)
+            (0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 1.0, 0.0), (1.0, 0.0, 0.0)
         ]
 
     vx, vy, vz = vertex_positions[vertex_index]
 
-    # Bestimme die 4 Sampling-Offsets basierend auf Vertex-Position
-    # Minecraft samplet: corner, side1, side2, diagonal
-    offsets = []
+    # KRITISCHE KORREKTUR: Richtungen invertieren!
+    # Wenn der Vertex bei x=0.0 ist, sample nach LINKS (x=-1)
+    # Wenn der Vertex bei x=1.0 ist, sample nach RECHTS (x=+1)
+    x_dir = -1 if vx == 0.0 else 1  # INVERTIERT
+    y_dir = -1 if vy == 0.0 else 1  # INVERTIERT
+    z_dir = -1 if vz == 0.0 else 1  # INVERTIERT
 
-    # Bestimme Richtungen für Sampling (wo der Vertex an Kanten liegt)
-    x_dir = -1 if vx == 0.0 else 1  # Nach links oder rechts
-    y_dir = -1 if vy == 0.0 else 1  # Nach unten oder oben
-    z_dir = -1 if vz == 0.0 else 1  # Nach hinten oder vorne
-
-    # Die 4 Blöcke um den Vertex:
-    # 1. Der Block an der Ecke (diagonal)
-    offsets.append((x_dir, y_dir, z_dir))
-
-    # 2-4. Die 3 angrenzenden Blöcke (entlang jeder Achse)
-    offsets.append((x_dir, 0, 0))  # Entlang X
-    offsets.append((0, y_dir, 0))  # Entlang Y
-    offsets.append((0, 0, z_dir))  # Entlang Z
-    offsets.append((x_dir, y_dir, 0))  # XY-Kante
-    offsets.append((x_dir, 0, z_dir))  # XZ-Kante
-    offsets.append((0, y_dir, z_dir))  # YZ-Kante
+    # Sample die 4 Blöcke um den Vertex herum
+    # Minecraft's Algorithmus: Corner, Side1, Side2, Diagonal
+    offsets = [
+        (x_dir, y_dir, z_dir),  # 1. Diagonal-Ecke
+        (x_dir, y_dir, 0),       # 2. XY-Kante
+        (x_dir, 0, z_dir),       # 3. XZ-Kante
+        (0, y_dir, z_dir)        # 4. YZ-Kante
+    ]
 
     # Sample Licht von umliegenden Blöcken
     light_sum = 0.0
@@ -293,7 +262,7 @@ def calculate_minecraft_vertex_light(light_map, block_data, x, y, z, face_index,
 
             # AO: Zähle solide Blöcke
             block_id = block_data[nx, ny, nz]
-            if block_id != -1.0 and block_id != 4.0:
+            if block_id != -1.0 and block_id != 4.0:  # Nicht Luft, nicht Blätter
                 ao_count += 1
         else:
             # Außerhalb = volle Helligkeit
@@ -303,15 +272,13 @@ def calculate_minecraft_vertex_light(light_map, block_data, x, y, z, face_index,
     # Berechne Durchschnitt
     avg_light = light_sum / max(count, 1) if count > 0 else 15.0
 
-    # Minecraft-Style AO (einfacher)
-    if ao_count >= 4:
+    # Minecraft-Style AO (Ambient Occlusion)
+    if ao_count >= 3:
         ao_factor = 0.6
-    elif ao_count == 3:
-        ao_factor = 0.75
     elif ao_count == 2:
-        ao_factor = 0.85
+        ao_factor = 0.75
     elif ao_count == 1:
-        ao_factor = 0.95
+        ao_factor = 0.9
     else:
         ao_factor = 1.0
 
