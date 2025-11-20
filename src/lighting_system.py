@@ -194,67 +194,91 @@ class LightingSystem:
 @jit(nopython=True, cache=True)
 def calculate_minecraft_vertex_light(light_map, block_data, x, y, z, face_index, vertex_index, channel):
     """
-    KORRIGIERT: Samplet Licht von NACHBAR-Blöcken, nicht vom aktuellen Block.
-    Die Richtung ist jetzt invertiert.
+    Samplet Licht von den NACHBAR-Blöcken in Richtung der Face-Normale.
+    Die Face zeigt in die Richtung, wo LUFT ist - dort samplen wir das Licht.
     """
     max_height = light_map.shape[1]
     size_x = light_map.shape[0]
     size_z = light_map.shape[2]
 
-    # Bestimme die Vertex-Position relativ zum Block (0.0 oder 1.0 auf jeder Achse)
-    if face_index == 0:  # Top (+Y)
+    # Bestimme die Face-Normale (wohin die Face zeigt)
+    # Das ist die Richtung, in der wir das Licht samplen müssen
+    if face_index == 0:  # Top (+Y) - Face zeigt nach oben
+        face_normal = (0, 1, 0)
         vertex_positions = [
             (0.0, 1.0, 0.0), (0.0, 1.0, 1.0), (1.0, 1.0, 1.0), (1.0, 1.0, 0.0)
         ]
-    elif face_index == 1:  # Bottom (-Y)
+    elif face_index == 1:  # Bottom (-Y) - Face zeigt nach unten
+        face_normal = (0, -1, 0)
         vertex_positions = [
             (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 1.0), (0.0, 0.0, 1.0)
         ]
-    elif face_index == 2:  # Left (-X)
+    elif face_index == 2:  # Left (-X) - Face zeigt nach links
+        face_normal = (-1, 0, 0)
         vertex_positions = [
             (0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 1.0), (0.0, 0.0, 1.0)
         ]
-    elif face_index == 3:  # Right (+X)
+    elif face_index == 3:  # Right (+X) - Face zeigt nach rechts
+        face_normal = (1, 0, 0)
         vertex_positions = [
             (1.0, 0.0, 0.0), (1.0, 0.0, 1.0), (1.0, 1.0, 1.0), (1.0, 1.0, 0.0)
         ]
-    elif face_index == 4:  # Front (+Z)
+    elif face_index == 4:  # Front (+Z) - Face zeigt nach vorne
+        face_normal = (0, 0, 1)
         vertex_positions = [
             (0.0, 0.0, 1.0), (0.0, 1.0, 1.0), (1.0, 1.0, 1.0), (1.0, 0.0, 1.0)
         ]
-    else:  # Back (-Z)
+    else:  # Back (-Z) - Face zeigt nach hinten
+        face_normal = (0, 0, -1)
         vertex_positions = [
             (0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 1.0, 0.0), (1.0, 0.0, 0.0)
         ]
 
     vx, vy, vz = vertex_positions[vertex_index]
 
-    # KRITISCHE KORREKTUR: Richtungen invertieren!
-    # Wenn der Vertex bei x=0.0 ist, sample nach LINKS (x=-1)
-    # Wenn der Vertex bei x=1.0 ist, sample nach RECHTS (x=+1)
-    x_dir = -1 if vx == 0.0 else 1  # INVERTIERT
-    y_dir = -1 if vy == 0.0 else 1  # INVERTIERT
-    z_dir = -1 if vz == 0.0 else 1  # INVERTIERT
+    # Berechne die Basis-Position für das Sampling
+    # Wir samplen IN RICHTUNG der Normale (wo Luft ist)
+    base_x = x + face_normal[0]
+    base_y = y + face_normal[1]
+    base_z = z + face_normal[2]
 
-    # Sample die 4 Blöcke um den Vertex herum
-    # Minecraft's Algorithmus: Corner, Side1, Side2, Diagonal
+    # Berechne die Offset-Richtungen für die tangentialen Achsen
+    # (die Achsen parallel zur Face-Ebene)
+    tangent_x = 0
+    tangent_y = 0
+    tangent_z = 0
+    bitangent_x = 0
+    bitangent_y = 0
+    bitangent_z = 0
+
+    # FIX: Wir müssen -1 verwenden, wenn die Koordinate 0.0 ist,
+    # damit wir den Nachbarblock prüfen und nicht den Luftblock selbst!
+
+    if face_index == 0 or face_index == 1:  # Top/Bottom (XZ-Ebene)
+        tangent_x = 1 if vx == 1.0 else -1  # <--- WAR 0
+        bitangent_z = 1 if vz == 1.0 else -1  # <--- WAR 0
+    elif face_index == 2 or face_index == 3:  # Left/Right (YZ-Ebene)
+        tangent_y = 1 if vy == 1.0 else -1  # <--- WAR 0
+        bitangent_z = 1 if vz == 1.0 else -1  # <--- WAR 0
+    else:  # Front/Back (XY-Ebene)
+        tangent_x = 1 if vx == 1.0 else -1  # <--- WAR 0
+        bitangent_y = 1 if vy == 1.0 else -1  # <--- WAR 0
+
+    # Die 4 Sampling-Positionen (Minecraft-Algorithmus):
+    # 1. Corner (diagonal), 2. Tangent, 3. Bitangent, 4. Base
     offsets = [
-        (x_dir, y_dir, z_dir),  # 1. Diagonal-Ecke
-        (x_dir, y_dir, 0),       # 2. XY-Kante
-        (x_dir, 0, z_dir),       # 3. XZ-Kante
-        (0, y_dir, z_dir)        # 4. YZ-Kante
+        (base_x + tangent_x + bitangent_x, base_y + tangent_y + bitangent_y, base_z + tangent_z + bitangent_z),
+        (base_x + tangent_x, base_y + tangent_y, base_z + tangent_z),
+        (base_x + bitangent_x, base_y + bitangent_y, base_z + bitangent_z),
+        (base_x, base_y, base_z)
     ]
 
-    # Sample Licht von umliegenden Blöcken
+    # Sample Licht von den 4 Positionen
     light_sum = 0.0
     count = 0
     ao_count = 0
 
-    for dx, dy, dz in offsets:
-        nx = x + dx
-        ny = y + dy
-        nz = z + dz
-
+    for nx, ny, nz in offsets:
         if 0 <= nx < size_x and 0 <= ny < max_height and 0 <= nz < size_z:
             light_val = light_map[nx, ny, nz, channel]
             light_sum += float(light_val)
