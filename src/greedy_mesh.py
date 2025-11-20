@@ -3,7 +3,7 @@ import numpy as np
 from numba import jit
 
 from .chunk_data import CHUNK_SIZE, MAX_HEIGHT, ID_AIR
-from .geometry_constants import CUBE_VERTICES, CUBE_UVS, CUBE_NORMALS
+from .geometry_constants import CUBE_VERTICES, CUBE_UVS, CUBE_NORMALS, FACE_SHADING
 from .block_definitions import (
     ID_LEAVES, ID_OAK_LOG, ID_GRASS, ID_DIRT, ID_STONE,
     NON_SOLID_BLOCKS_NUMBA, OAK_LOG_TEXTURES, GRASS_TEXTURES,
@@ -109,7 +109,13 @@ def generate_face_culling_mesh_v6(cx, cz, block_data, light_map):
                             )
 
                             # Kombiniere Sonnen- und Blocklicht (nimm Maximum)
+                            # Kombiniere Sonnen- und Blocklicht (nimm Maximum)
                             combined_light = max(sunlight, blocklight)
+
+                            # --- NEUER CODE ANFANG ---
+                            # Wende das Face-Shading an (Seiten dunkler machen)
+                            shading_factor = FACE_SHADING[i_face]
+                            combined_light = combined_light * shading_factor
 
                             # Schreibe Vertex-Daten (7 Floats)
                             vertices[start_vert_idx] = wx + vx
