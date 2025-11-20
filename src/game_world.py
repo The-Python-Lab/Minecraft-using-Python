@@ -17,6 +17,10 @@ from src.lighting_system import LightingSystem
 THREAD_POOL_SIZE = 4
 EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=THREAD_POOL_SIZE)
 
+# PERFORMANCE-LIMITS (Verhindert Ruckeln)
+MAX_CHUNKS_PER_FRAME = 2  # Maximal 2 Chunks pro Frame verarbeiten
+MAX_MESH_BUILDS_PER_FRAME = 3  # Maximal 3 Meshes pro Frame erstellen
+
 
 class GameWorld:
     def __init__(self, window, shader, width, height):
@@ -213,6 +217,17 @@ class GameWorld:
         for r_coord in chunks_to_update:
             self._force_remesh_chunk(r_coord)
 
+    def _get_chunk_distance(self, coord):
+        """Berechnet die Entfernung eines Chunks zum Spieler (für Priorisierung)."""
+        cx, cz = coord
+        chunk_center_x = (cx + 0.5) * CHUNK_SIZE
+        chunk_center_z = (cz + 0.5) * CHUNK_SIZE
+
+        dx = chunk_center_x - self.player.pos[0]
+        dz = chunk_center_z - self.player.pos[2]
+
+        return dx * dx + dz * dz  # Quadratische Entfernung (schneller als sqrt)
+
     def _manage_chunks(self):
         """Lädt, generiert und entlädt Chunks basierend auf der Spielerposition."""
         player_chunk_x = int(self.player.pos[0] // CHUNK_SIZE)
@@ -247,61 +262,89 @@ class GameWorld:
                         except Exception as e:
                             print(f"Mesh-Future Fehler für {coord}: {e}")
 
-        # Sammeln fertiger Blockdaten-Futures
+        # PERFORMANCE-OPTIMIERUNG: Sammle und priorisiere fertige Futures
         finished_data_futures = []
-
         for coord, future in self.data_futures.items():
             if future.done():
                 finished_data_futures.append(coord)
-                try:
-                    result = future.result()
-                    if isinstance(result, Exception): raise result
-                    self.world_data[coord] = result
 
-                    # Initialisiere Beleuchtung
-                    self.lighting.init_chunk_lighting(coord, result)
+        # Sortiere nach Entfernung zum Spieler (nächste zuerst)
+        finished_data_futures.sort(key=self._get_chunk_distance)
 
-                    # AGGRESSIVE SYNCHRONISATION MIT NACHBARN
-                    cx, cz = coord
-                    neighbors = [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)]
-
-                    # Erst synchronisiere diesen Chunk
-                    self.lighting.sync_light_padding(coord, self.world_data)
-
-                    # Dann alle Nachbarn bidirektional
-                    for neighbor_coord in neighbors:
-                        if neighbor_coord in self.lighting.light_data:
-                            # Synchronisiere Nachbar
-                            self.lighting.sync_light_padding(neighbor_coord, self.world_data)
-
-                            # KRITISCH: Force Re-Mesh des Nachbarn!
-                            self._force_remesh_chunk(neighbor_coord)
-
-                    # Synchronisiere den neuen Chunk nochmal (für diagonale Nachbarn)
-                    self.lighting.sync_light_padding(coord, self.world_data)
-
-                except Exception as e:
-                    print(f"BlockData-Fehler für {coord}: {e}")
-
+        # LIMIT: Verarbeite nur MAX_CHUNKS_PER_FRAME Chunks pro Frame
+        chunks_processed = 0
         for coord in finished_data_futures:
-            del self.data_futures[coord]
+            if chunks_processed >= MAX_CHUNKS_PER_FRAME:
+                break  # Restliche Chunks im nächsten Frame verarbeiten
 
-        # Sammeln fertiger Mesh-Futures
+            try:
+                result = self.data_futures[coord].result()
+                if isinstance(result, Exception):
+                    raise result
+
+                self.world_data[coord] = result
+
+                # Initialisiere Beleuchtung
+                self.lighting.init_chunk_lighting(coord, result)
+
+                # AGGRESSIVE SYNCHRONISATION MIT NACHBARN
+                cx, cz = coord
+                neighbors = [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)]
+
+                # Erst synchronisiere diesen Chunk
+                self.lighting.sync_light_padding(coord, self.world_data)
+
+                # Dann alle Nachbarn bidirektional
+                for neighbor_coord in neighbors:
+                    if neighbor_coord in self.lighting.light_data:
+                        # Synchronisiere Nachbar
+                        self.lighting.sync_light_padding(neighbor_coord, self.world_data)
+
+                        # KRITISCH: Force Re-Mesh des Nachbarn!
+                        self._force_remesh_chunk(neighbor_coord)
+
+                # Synchronisiere den neuen Chunk nochmal (für diagonale Nachbarn)
+                self.lighting.sync_light_padding(coord, self.world_data)
+
+                del self.data_futures[coord]
+                chunks_processed += 1
+
+            except Exception as e:
+                print(f"BlockData-Fehler für {coord}: {e}")
+                del self.data_futures[coord]
+
+        # PERFORMANCE-OPTIMIERUNG: Sammle und priorisiere fertige Mesh-Futures
         finished_mesh_futures = []
         for coord, future in self.mesh_futures.items():
             if future.done():
                 finished_mesh_futures.append(coord)
-                try:
-                    result = future.result()
-                    if isinstance(result, Exception): raise result
-                    verts, inds = result
 
-                    if inds.size > 0:
-                        vao, count, vbo, ebo = create_chunk_buffers_from_data(verts, inds)
-                        self.chunk_data[coord] = (vao, count, vbo, ebo)
-                except Exception as e:
-                    print(f"Mesh-Generierungsfehler für {coord}: {e}")
-        for coord in finished_mesh_futures: del self.mesh_futures[coord]
+        # Sortiere nach Entfernung zum Spieler
+        finished_mesh_futures.sort(key=self._get_chunk_distance)
+
+        # LIMIT: Verarbeite nur MAX_MESH_BUILDS_PER_FRAME Meshes pro Frame
+        meshes_built = 0
+        for coord in finished_mesh_futures:
+            if meshes_built >= MAX_MESH_BUILDS_PER_FRAME:
+                break  # Restliche Meshes im nächsten Frame verarbeiten
+
+            try:
+                result = self.mesh_futures[coord].result()
+                if isinstance(result, Exception):
+                    raise result
+
+                verts, inds = result
+
+                if inds.size > 0:
+                    vao, count, vbo, ebo = create_chunk_buffers_from_data(verts, inds)
+                    self.chunk_data[coord] = (vao, count, vbo, ebo)
+
+                del self.mesh_futures[coord]
+                meshes_built += 1
+
+            except Exception as e:
+                print(f"Mesh-Generierungsfehler für {coord}: {e}")
+                del self.mesh_futures[coord]
 
         # Entladen veralteter Chunks
         chunks_to_delete_data = [coord for coord in self.world_data if
