@@ -42,10 +42,6 @@ class GameWorld:
         self.mouse_last_y = 0.0
         self.mouse_first_input = True
 
-        # NEU: Frame-Counter für periodische Licht-Synchronisation
-        self.frame_counter = 0
-        self.light_sync_interval = 60  # Alle 60 Frames (ca. 1 Sekunde)
-
         self.view_loc = glGetUniformLocation(shader, "view")
         self.proj_loc = glGetUniformLocation(shader, "projection")
         self.model_loc = glGetUniformLocation(shader, "model")
@@ -139,6 +135,25 @@ class GameWorld:
         if focused:
             self.mouse_first_input = True
 
+    def _force_remesh_chunk(self, coord):
+        """Erzwingt ein Re-Mesh eines Chunks (löscht altes Mesh und startet neu)."""
+        if coord not in self.world_data or coord not in self.lighting.light_data:
+            return
+
+        # Lösche bestehendes Mesh
+        if coord in self.chunk_data:
+            vao, _, vbo, ebo = self.chunk_data[coord]
+            delete_chunk_buffers(vao, vbo, ebo)
+            del self.chunk_data[coord]
+
+        # Starte neuen Mesh-Job (nur wenn nicht bereits in Arbeit)
+        if coord not in self.mesh_futures:
+            cx, cz = coord
+            light_map = self.lighting.light_data[coord]
+            future = EXECUTOR.submit(mesh_worker_wrapper, cx, cz,
+                                     self.world_data[coord], light_map)
+            self.mesh_futures[coord] = future
+
     def _update_world_block(self, coord, block_x, block_y, block_z, new_id):
         """Aktualisiert Blockdaten und markiert umliegende Chunks zum Re-Meshing."""
         cx, cz = coord
@@ -184,11 +199,11 @@ class GameWorld:
                 self.world_data[n_coord][local_x, block_y, 0] = new_id
                 chunks_to_update.add(n_coord)
 
-        # KRITISCH: Synchronisiere Licht-Padding für ALLE betroffenen Chunks
+        # Synchronisiere Licht für alle betroffenen Chunks
         for update_coord in chunks_to_update:
             self.lighting.sync_light_padding(update_coord, self.world_data)
 
-            # Auch Nachbarn des Updates synchronisieren
+            # Synchronisiere auch Nachbarn
             ucx, ucz = update_coord
             for neighbor in [(ucx - 1, ucz), (ucx + 1, ucz), (ucx, ucz - 1), (ucx, ucz + 1)]:
                 if neighbor in self.lighting.light_data:
@@ -196,18 +211,7 @@ class GameWorld:
 
         # Re-Mesh alle betroffenen Chunks
         for r_coord in chunks_to_update:
-            r_cx, r_cz = r_coord
-            if r_coord in self.world_data and r_coord not in self.mesh_futures:
-                if r_coord in self.chunk_data:
-                    vao, _, vbo, ebo = self.chunk_data[r_coord]
-                    delete_chunk_buffers(vao, vbo, ebo)
-                    del self.chunk_data[r_coord]
-
-                light_map = self.lighting.light_data.get(r_coord, None)
-                if light_map is not None:
-                    future = EXECUTOR.submit(mesh_worker_wrapper, r_cx, r_cz,
-                                             self.world_data[r_coord], light_map)
-                    self.mesh_futures[r_coord] = future
+            self._force_remesh_chunk(r_coord)
 
     def _manage_chunks(self):
         """Lädt, generiert und entlädt Chunks basierend auf der Spielerposition."""
@@ -245,7 +249,6 @@ class GameWorld:
 
         # Sammeln fertiger Blockdaten-Futures
         finished_data_futures = []
-        chunks_needing_remesh = set()
 
         for coord, future in self.data_futures.items():
             if future.done():
@@ -258,44 +261,30 @@ class GameWorld:
                     # Initialisiere Beleuchtung
                     self.lighting.init_chunk_lighting(coord, result)
 
-                    # KRITISCH: Synchronisiere mit ALLEN Nachbarn (bidirektional!)
+                    # AGGRESSIVE SYNCHRONISATION MIT NACHBARN
                     cx, cz = coord
                     neighbors = [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)]
 
-                    # Synchronisiere diesen Chunk mit Nachbarn
+                    # Erst synchronisiere diesen Chunk
                     self.lighting.sync_light_padding(coord, self.world_data)
 
-                    # Synchronisiere auch alle Nachbarn zurück (bidirektional!)
+                    # Dann alle Nachbarn bidirektional
                     for neighbor_coord in neighbors:
                         if neighbor_coord in self.lighting.light_data:
+                            # Synchronisiere Nachbar
                             self.lighting.sync_light_padding(neighbor_coord, self.world_data)
 
-                            # WICHTIG: Nachbar-Chunks müssen neu gerendert werden!
-                            if neighbor_coord in self.chunk_data:
-                                chunks_needing_remesh.add(neighbor_coord)
+                            # KRITISCH: Force Re-Mesh des Nachbarn!
+                            self._force_remesh_chunk(neighbor_coord)
+
+                    # Synchronisiere den neuen Chunk nochmal (für diagonale Nachbarn)
+                    self.lighting.sync_light_padding(coord, self.world_data)
 
                 except Exception as e:
                     print(f"BlockData-Fehler für {coord}: {e}")
 
         for coord in finished_data_futures:
             del self.data_futures[coord]
-
-        # Re-Mesh alle Nachbar-Chunks die durch neues Laden betroffen sind
-        for remesh_coord in chunks_needing_remesh:
-            if remesh_coord not in self.mesh_futures:
-                # Lösche altes Mesh
-                if remesh_coord in self.chunk_data:
-                    vao, _, vbo, ebo = self.chunk_data[remesh_coord]
-                    delete_chunk_buffers(vao, vbo, ebo)
-                    del self.chunk_data[remesh_coord]
-
-                # Erstelle neues Mesh mit korrektem Licht
-                light_map = self.lighting.light_data.get(remesh_coord, None)
-                if light_map is not None:
-                    r_cx, r_cz = remesh_coord
-                    future = EXECUTOR.submit(mesh_worker_wrapper, r_cx, r_cz,
-                                             self.world_data[remesh_coord], light_map)
-                    self.mesh_futures[remesh_coord] = future
 
         # Sammeln fertiger Mesh-Futures
         finished_mesh_futures = []
@@ -373,12 +362,6 @@ class GameWorld:
     def update(self, dt):
         self._manage_chunks()
 
-        # NEU: Periodische Licht-Synchronisation für alle Chunk-Grenzen
-        self.frame_counter += 1
-        if self.frame_counter >= self.light_sync_interval:
-            self.frame_counter = 0
-            self._periodic_light_sync()
-
         if glfw.get_input_mode(self.window, glfw.CURSOR) == glfw.CURSOR_DISABLED:
             self.player.handle_mouse_input()
             self.player.apply_movement_input(self.window, dt)
@@ -388,16 +371,6 @@ class GameWorld:
             self.player.target_velocity[:] = 0.0
 
         self.player.apply_physics(dt, self.world_data, CHUNK_SIZE)
-
-    def _periodic_light_sync(self):
-        """
-        Synchronisiert periodisch alle Chunk-Grenzen.
-        Verhindert falsche Schatten bei neu geladenen Chunks.
-        """
-        # Synchronisiere alle geladenen Chunks mit ihren Nachbarn
-        for coord in list(self.lighting.light_data.keys()):
-            if coord in self.world_data:
-                self.lighting.sync_light_padding(coord, self.world_data)
 
     def render(self):
         view = self.player.get_view_matrix()
